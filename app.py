@@ -29,12 +29,14 @@ if not os.path.exists(os.path.join(t5_path, "config.json")):
 tokenizer = T5Tokenizer.from_pretrained(t5_path, local_files_only=True)
 t5_model = T5ForConditionalGeneration.from_pretrained(t5_path, local_files_only=True)
 
-# Load Vosk model
-vosk_path = "models/vosk"
-if not os.path.exists(os.path.join(vosk_path, "conf")):
-    raise FileNotFoundError("Vosk model not found. Place your model (e.g. vosk-model-small-en-us-0.15) in models/vosk.")
+# Download Vosk model from Hugging Face if not already downloaded
+vosk_model_path = "models/vosk"
+if not os.path.exists(os.path.join(vosk_model_path, "conf")):
+    print("Downloading Vosk model from Hugging Face...")
+    snapshot_download(repo_id="AGLoki/vosk-model-small-en-us-0.15", local_dir=vosk_model_path, local_dir_use_symlinks=False)
 
-vosk_model = VoskModel(vosk_path)
+# Load Vosk model
+vosk_model = VoskModel(vosk_model_path)
 
 @app.route('/')
 def index():
