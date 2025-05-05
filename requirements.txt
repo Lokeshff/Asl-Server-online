@@ -3,3 +3,4 @@ transformers
 torch
 vosk
 ffmpeg-python
+huggingface_hub
