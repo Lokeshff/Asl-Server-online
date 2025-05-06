@@ -20,11 +20,11 @@ os.makedirs("models", exist_ok=True)
 
 # ------------------ Download and Load T5 Model ------------------
 print("Downloading T5 model from Hugging Face...")
-snapshot_download(repo_id="AGLoki/asl-gloss-t5")  # Just ensure it's downloaded
+snapshot_download(repo_id="AGLoki/t5-small")  # Just ensure it's downloaded
 
 # Load tokenizer and model using repo_id instead of local path
-tokenizer = T5Tokenizer.from_pretrained("AGLoki/asl-gloss-t5")
-t5_model = T5ForConditionalGeneration.from_pretrained("AGLoki/asl-gloss-t5")
+tokenizer = T5Tokenizer.from_pretrained("AGLoki/t5-small")
+t5_model = T5ForConditionalGeneration.from_pretrained("AGLoki/t5-small")
 
 # ------------------ Download and Load Vosk Model ------------------
 vosk_model_path = "models/vosk"
