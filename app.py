@@ -20,9 +20,11 @@ os.makedirs("models", exist_ok=True)
 
 # ------------------ Download and Load T5 Model ------------------
 print("Downloading T5 model from Hugging Face...")
-t5_downloaded_path = snapshot_download(repo_id="AGLoki/asl-gloss-t5")
-tokenizer = T5Tokenizer.from_pretrained(t5_downloaded_path)
-t5_model = T5ForConditionalGeneration.from_pretrained(t5_downloaded_path)
+snapshot_download(repo_id="AGLoki/asl-gloss-t5")  # Just ensure it's downloaded
+
+# Load tokenizer and model using repo_id instead of local path
+tokenizer = T5Tokenizer.from_pretrained("AGLoki/asl-gloss-t5")
+t5_model = T5ForConditionalGeneration.from_pretrained("AGLoki/asl-gloss-t5")
 
 # ------------------ Download and Load Vosk Model ------------------
 vosk_model_path = "models/vosk"
@@ -32,7 +34,6 @@ if not os.path.exists(os.path.join(vosk_model_path, "conf")):
 
 vosk_model = VoskModel(vosk_model_path)
 
-# ------------------ Flask Routes ------------------
 @app.route('/')
 def index():
     return "ASL Gloss Server is running!"
@@ -48,7 +49,7 @@ def predict():
         # Save incoming file
         audio_file.save(raw_input_path)
 
-        # Convert to 16kHz mono WAV using ffmpeg
+        # Convert to mono 16kHz WAV using ffmpeg
         subprocess.run([
             "ffmpeg", "-y", "-i", raw_input_path,
             "-ac", "1", "-ar", "16000", "-sample_fmt", "s16",
@@ -80,7 +81,6 @@ def predict():
 
         logging.info(f"ASL Gloss: {gloss}")
 
-        # Cleanup
         os.remove(raw_input_path)
 
         return jsonify({
@@ -92,6 +92,5 @@ def predict():
         logging.error(f"Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# ------------------ Run App ------------------
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000)
