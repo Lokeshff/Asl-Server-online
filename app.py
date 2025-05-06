@@ -14,30 +14,25 @@ logging.basicConfig(filename="server_log.txt", level=logging.INFO, format="%(asc
 
 app = Flask(__name__)
 
-# Create model and audio directories if not exist
+# Create directories
 os.makedirs("converted_audio", exist_ok=True)
-os.makedirs("models/t5-small", exist_ok=True)
-os.makedirs("models/vosk", exist_ok=True)
+os.makedirs("models", exist_ok=True)
 
-# Download Hugging Face T5 model if not already downloaded
-t5_path = "models/t5-small"
-if not os.path.exists(os.path.join(t5_path, "config.json")):
-    print("Downloading T5 model from Hugging Face...")
-    snapshot_download(repo_id="AGLoki/asl-gloss-t5", local_dir=t5_path, local_dir_use_symlinks=False)
+# ------------------ Download and Load T5 Model ------------------
+print("Downloading T5 model from Hugging Face...")
+t5_downloaded_path = snapshot_download(repo_id="AGLoki/asl-gloss-t5")
+tokenizer = T5Tokenizer.from_pretrained(t5_downloaded_path)
+t5_model = T5ForConditionalGeneration.from_pretrained(t5_downloaded_path)
 
-# Load T5 model
-tokenizer = T5Tokenizer.from_pretrained(t5_path, local_files_only=True)
-t5_model = T5ForConditionalGeneration.from_pretrained(t5_path, local_files_only=True)
-
-# Download Vosk model from Hugging Face if not already downloaded
+# ------------------ Download and Load Vosk Model ------------------
 vosk_model_path = "models/vosk"
 if not os.path.exists(os.path.join(vosk_model_path, "conf")):
     print("Downloading Vosk model from Hugging Face...")
-    snapshot_download(repo_id="AGLoki/vosk-model-small-en-us-0.15", local_dir=vosk_model_path, local_dir_use_symlinks=False)
+    snapshot_download(repo_id="AGLoki/vosk-model-small-en-us-0.15", local_dir=vosk_model_path)
 
-# Load Vosk model
 vosk_model = VoskModel(vosk_model_path)
 
+# ------------------ Flask Routes ------------------
 @app.route('/')
 def index():
     return "ASL Gloss Server is running!"
@@ -50,10 +45,10 @@ def predict():
         wav_filename = f"{uuid.uuid4().hex}.wav"
         wav_path = os.path.join("converted_audio", wav_filename)
 
-        # Save the incoming audio
+        # Save incoming file
         audio_file.save(raw_input_path)
 
-        # Convert to mono 16kHz WAV using ffmpeg
+        # Convert to 16kHz mono WAV using ffmpeg
         subprocess.run([
             "ffmpeg", "-y", "-i", raw_input_path,
             "-ac", "1", "-ar", "16000", "-sample_fmt", "s16",
@@ -64,10 +59,9 @@ def predict():
         wf = wave.open(wav_path, "rb")
         recognizer = KaldiRecognizer(vosk_model, wf.getframerate())
         text = ""
-
         while True:
             data = wf.readframes(4000)
-            if len(data) == 0:
+            if not data:
                 break
             if recognizer.AcceptWaveform(data):
                 result = json.loads(recognizer.Result())
@@ -78,7 +72,7 @@ def predict():
 
         logging.info(f"Transcribed Text: {text.strip()}")
 
-        # Translate to ASL Gloss using T5
+        # Translate to ASL Gloss
         input_text = "translate English to ASL: " + text.strip()
         input_ids = tokenizer(input_text, return_tensors="pt").input_ids
         output_ids = t5_model.generate(input_ids, max_length=50)[0]
@@ -98,5 +92,6 @@ def predict():
         logging.error(f"Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+# ------------------ Run App ------------------
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000)
