@@ -1,17 +1,26 @@
+import logging
 from flask import Flask, request, jsonify
-from transformers import T5Tokenizer, T5ForConditionalGeneration
+import os
+import torch
+import subprocess
+from transformers import T5ForConditionalGeneration, T5Tokenizer
 from vosk import Model as VoskModel, KaldiRecognizer
 from huggingface_hub import snapshot_download
-import torch
-import os
 import wave
 import json
-import subprocess
 import uuid
+
+# Setup logging
+logging.basicConfig(
+    filename='server_log.txt',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logging.getLogger().addHandler(logging.StreamHandler())  # Also log to console
 
 app = Flask(__name__)
 
-# === Step 1: Download model repo from Hugging Face ===
+# === Step 1: Download models from Hugging Face ===
 hf_repo_id = "AGLoki/asl-gloss-t5"
 repo_dir = snapshot_download(repo_id=hf_repo_id, local_dir="models", local_dir_use_symlinks=False)
 
@@ -27,63 +36,68 @@ model = T5ForConditionalGeneration.from_pretrained(t5_path)
 print("Loading Vosk model from:", vosk_path)
 vosk_model = VoskModel(vosk_path)
 
-# === Step 3: API Route ===
+# Ensure folder for storing converted WAV files
+os.makedirs("converted_audio", exist_ok=True)
+
+@app.route('/')
+def index():
+    return "Flask server is running!"
+
 @app.route('/predict', methods=['POST'])
 def predict():
-    if 'audio' not in request.files:
-        return jsonify({"error": "No audio file uploaded"}), 400
-
-    audio_file = request.files['audio']
-    original_filename = f"temp_input_{uuid.uuid4().hex}"
-    input_path = f"{original_filename}.webm"  # You can adjust extension if needed
-    wav_path = f"{original_filename}.wav"
-
-    audio_file.save(input_path)
-
-    # === Convert to WAV (mono, PCM, 16-bit) ===
     try:
-        ffmpeg_cmd = [
-            "ffmpeg", "-y", "-i", input_path,
-            "-ac", "1",               # mono
-            "-ar", "16000",           # 16 kHz
-            "-sample_fmt", "s16",     # 16-bit signed
+        audio_file = request.files['audio']
+        raw_path = f"temp_{uuid.uuid4().hex}.input"
+        wav_filename = f"{uuid.uuid4().hex}.wav"
+        wav_path = os.path.join("converted_audio", wav_filename)
+
+        # Save uploaded audio file
+        audio_file.save(raw_path)
+
+        # Convert to WAV (mono, 16kHz) using ffmpeg
+        subprocess.run([
+            "ffmpeg", "-y", "-i", raw_path,
+            "-ac", "1", "-ar", "16000", "-sample_fmt", "s16",
             wav_path
-        ]
-        subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    except subprocess.CalledProcessError:
-        os.remove(input_path)
-        return jsonify({"error": "Audio conversion failed. Ensure ffmpeg is installed."}), 500
+        ], check=True)
 
-    # === Speech Recognition with Vosk ===
-    wf = wave.open(wav_path, "rb")
-    rec = KaldiRecognizer(vosk_model, wf.getframerate())
-    rec.SetWords(True)
+        # Transcribe with Vosk
+        wf = wave.open(wav_path, "rb")
+        rec = KaldiRecognizer(vosk_model, wf.getframerate())
+        text = ""
+        while True:
+            data = wf.readframes(4000)
+            if len(data) == 0:
+                break
+            if rec.AcceptWaveform(data):
+                res = json.loads(rec.Result())
+                text += res.get("text", "")
+                logging.info(f"Partial Transcription: {res.get('text', '')}")
+        res = json.loads(rec.FinalResult())
+        text += res.get("text", "")
+        wf.close()
 
-    transcript = ""
-    while True:
-        data = wf.readframes(4000)
-        if len(data) == 0:
-            break
-        if rec.AcceptWaveform(data):
-            result = json.loads(rec.Result())
-            transcript += result.get("text", "") + " "
+        logging.info(f"Final Transcription: {text}")
 
-    wf.close()
-    os.remove(input_path)
-    os.remove(wav_path)
+        # Generate ASL gloss
+        input_text = "translate English to ASL: " + text
+        input_ids = tokenizer(input_text, return_tensors="pt").input_ids
+        output_ids = model.generate(input_ids, max_length=50)[0]
+        asl_gloss = tokenizer.decode(output_ids, skip_special_tokens=True)
 
-    if not transcript.strip():
-        return jsonify({"error": "No speech detected."}), 400
+        logging.info(f"ASL Gloss Output: {asl_gloss}")
 
-    # === T5 Translation to ASL Gloss ===
-    input_ids = tokenizer.encode(transcript.strip(), return_tensors="pt")
-    output_ids = model.generate(input_ids)
-    gloss = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        os.remove(raw_path)
 
-    return jsonify({
-        "transcript": transcript.strip(),
-        "asl_gloss": gloss
-    })
+        return jsonify({
+            "asl_gloss": asl_gloss,
+            "gesture_video": asl_gloss.upper().replace(" ", "_") + ".mp4",
+            "converted_wav": wav_filename
+        })
+
+    except Exception as e:
+        logging.error(f"Error during processing: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host="0.0.0.0", port=5000)
