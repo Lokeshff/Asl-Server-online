@@ -1,104 +1,89 @@
-import logging
-import os
-import uuid
-import wave
-import json
-import subprocess
 from flask import Flask, request, jsonify
 from transformers import T5Tokenizer, T5ForConditionalGeneration
 from vosk import Model as VoskModel, KaldiRecognizer
 from huggingface_hub import snapshot_download
-
-# Setup logging
-logging.basicConfig(
-    filename='server_log.txt',
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+import torch
+import os
+import wave
+import json
+import subprocess
+import uuid
 
 app = Flask(__name__)
 
-# Define model source
-HF_REPO_ID = "AGLoki/asl-gloss-t5"
+# === Step 1: Download model repo from Hugging Face ===
+hf_repo_id = "AGLoki/asl-gloss-t5"
+repo_dir = snapshot_download(repo_id=hf_repo_id, local_dir="models", local_dir_use_symlinks=False)
 
-# Base path and model paths
-base_dir = os.path.dirname(os.path.abspath(__file__))
-model_root_dir = os.path.join(base_dir, "asl-models")
-t5_model_dir = os.path.join(model_root_dir, "t5-small")
-vosk_model_dir = os.path.join(model_root_dir, "vosk-model-small-en-us-0.15")
+# Subfolder paths
+t5_path = os.path.join(repo_dir, "t5-small")
+vosk_path = os.path.join(repo_dir, "vosk-model-small-en-us-0.15")
 
-# Download models once
-if not os.path.exists(model_root_dir):
-    logging.info("Downloading models from Hugging Face...")
-    snapshot_download(repo_id=HF_REPO_ID, local_dir=model_root_dir, repo_type="model")
+# === Step 2: Load models ===
+print("Loading T5 model from:", t5_path)
+tokenizer = T5Tokenizer.from_pretrained(t5_path)
+model = T5ForConditionalGeneration.from_pretrained(t5_path)
 
-# Load models
-tokenizer = T5Tokenizer.from_pretrained(t5_model_dir, local_files_only=True)
-model = T5ForConditionalGeneration.from_pretrained(t5_model_dir, local_files_only=True)
-vosk_model = VoskModel(vosk_model_dir)
+print("Loading Vosk model from:", vosk_path)
+vosk_model = VoskModel(vosk_path)
 
-# Ensure folder for storing converted WAV files
-os.makedirs("converted_audio", exist_ok=True)
-
-@app.route('/')
-def index():
-    return "ASL Flask server is running!"
-
+# === Step 3: API Route ===
 @app.route('/predict', methods=['POST'])
 def predict():
+    if 'audio' not in request.files:
+        return jsonify({"error": "No audio file uploaded"}), 400
+
+    audio_file = request.files['audio']
+    original_filename = f"temp_input_{uuid.uuid4().hex}"
+    input_path = f"{original_filename}.webm"  # You can adjust extension if needed
+    wav_path = f"{original_filename}.wav"
+
+    audio_file.save(input_path)
+
+    # === Convert to WAV (mono, PCM, 16-bit) ===
     try:
-        audio_file = request.files['audio']
-        raw_path = f"temp_{uuid.uuid4().hex}.input"
-        wav_filename = f"{uuid.uuid4().hex}.wav"
-        wav_path = os.path.join("converted_audio", wav_filename)
-
-        # Save uploaded audio
-        audio_file.save(raw_path)
-
-        # Convert to WAV format (mono, 16kHz, 16-bit PCM)
-        subprocess.run([
-            "ffmpeg", "-y", "-i", raw_path,
-            "-ac", "1", "-ar", "16000", "-sample_fmt", "s16",
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-ac", "1",               # mono
+            "-ar", "16000",           # 16 kHz
+            "-sample_fmt", "s16",     # 16-bit signed
             wav_path
-        ], check=True)
+        ]
+        subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    except subprocess.CalledProcessError:
+        os.remove(input_path)
+        return jsonify({"error": "Audio conversion failed. Ensure ffmpeg is installed."}), 500
 
-        # Speech-to-text with Vosk
-        wf = wave.open(wav_path, "rb")
-        rec = KaldiRecognizer(vosk_model, wf.getframerate())
-        text = ""
-        while True:
-            data = wf.readframes(4000)
-            if len(data) == 0:
-                break
-            if rec.AcceptWaveform(data):
-                res = json.loads(rec.Result())
-                text += res.get("text", "") + " "
-        res = json.loads(rec.FinalResult())
-        text += res.get("text", "")
-        wf.close()
+    # === Speech Recognition with Vosk ===
+    wf = wave.open(wav_path, "rb")
+    rec = KaldiRecognizer(vosk_model, wf.getframerate())
+    rec.SetWords(True)
 
-        logging.info(f"Final Transcription: {text}")
+    transcript = ""
+    while True:
+        data = wf.readframes(4000)
+        if len(data) == 0:
+            break
+        if rec.AcceptWaveform(data):
+            result = json.loads(rec.Result())
+            transcript += result.get("text", "") + " "
 
-        # Translate to ASL gloss using T5
-        input_text = "translate English to ASL: " + text
-        input_ids = tokenizer(input_text, return_tensors="pt").input_ids
-        output_ids = model.generate(input_ids, max_length=50)[0]
-        asl_gloss = tokenizer.decode(output_ids, skip_special_tokens=True)
+    wf.close()
+    os.remove(input_path)
+    os.remove(wav_path)
 
-        logging.info(f"ASL Gloss Output: {asl_gloss}")
+    if not transcript.strip():
+        return jsonify({"error": "No speech detected."}), 400
 
-        # Cleanup temp file
-        os.remove(raw_path)
+    # === T5 Translation to ASL Gloss ===
+    input_ids = tokenizer.encode(transcript.strip(), return_tensors="pt")
+    output_ids = model.generate(input_ids)
+    gloss = tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
-        return jsonify({
-            "asl_gloss": asl_gloss,
-            "gesture_video": asl_gloss.upper().replace(" ", "_") + ".mp4",
-            "converted_wav": wav_filename
-        })
-
-    except Exception as e:
-        logging.error(f"Error during prediction: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+    return jsonify({
+        "transcript": transcript.strip(),
+        "asl_gloss": gloss
+    })
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host='0.0.0.0', port=5000)
